@@ -1,0 +1,180 @@
+#!/bin/bash
+
+# Simple VPC CLI Tool — vpcctl
+# Usage: ./vpcctl create|delete|peer|deploy-app|teardown
+apply_policy() {
+  POLICY_FILE="$2"
+  if [ ! -f "$POLICY_FILE" ]; then
+    echo "Policy file not found: $POLICY_FILE"
+    exit 1
+  fi
+
+SUBNET=$(jq -r '.subnet' "$POLICY_FILE")
+
+# Explicit mapping
+  if [[ "$SUBNET" == "192.168.50.0/24" ]]; then
+    NS_NAME="ns-public"
+  elif [[ "$SUBNET" == "10.20.0.0/24" ]]; then
+    NS_NAME="ns2-public"
+  else
+    echo "No matching namespace found for subnet $SUBNET"
+    exit 1
+  fi
+
+  echo "Applying policy to $NS_NAME..."
+
+  for rule in $(jq -c '.ingress[]' "$POLICY_FILE"); do
+    PORT=$(echo "$rule" | jq -r '.port')
+    PROTO=$(echo "$rule" | jq -r '.protocol')
+    ACTION=$(echo "$rule" | jq -r '.action')
+
+    if [ "$ACTION" == "allow" ]; then
+      ip netns exec "$NS_NAME" iptables -A INPUT -p "$PROTO" --dport "$PORT" -j ACCEPT
+    elif [ "$ACTION" == "deny" ]; then
+      ip netns exec "$NS_NAME" iptables -A INPUT -p "$PROTO" --dport "$PORT" -j DROP
+    fi
+  done
+
+  echo "✅ Policy applied to $NS_NAME"
+}
+
+
+VPC1_NAME="vpc1"
+VPC1_CIDR="192.168.50.0/24"
+VPC1_GATEWAY="192.168.50.10"
+
+VPC2_NAME="vpc2"
+VPC2_CIDR="10.20.0.0/24"
+VPC2_GATEWAY="10.20.0.10"
+
+INTERNET_IF="eth0"
+
+log() {
+  echo "[$(date +'%H:%M:%S')] $1"
+}
+
+create_vpc() {
+  log "Cleaning up any existing devices..."
+  ip netns del ns-public 2>/dev/null || true
+  ip netns del ns-private 2>/dev/null || true
+  ip netns del ns2-public 2>/dev/null || true
+  ip netns del ns2-private 2>/dev/null || true
+  ip link del v-net1 2>/dev/null || true
+  ip link del v-net2 2>/dev/null || true
+  ip link del veth-public 2>/dev/null || true
+  ip link del veth-private 2>/dev/null || true
+  ip link del veth2-public 2>/dev/null || true
+  ip link del veth2-private 2>/dev/null || true
+  ip link del veth-public-br 2>/dev/null || true
+  ip link del veth-private-br 2>/dev/null || true
+  ip link del veth2-public-br 2>/dev/null || true
+  ip link del veth2-private-br 2>/dev/null || true
+  ip link del veth-peer1 2>/dev/null || true
+  ip link del veth-peer2 2>/dev/null || true
+
+  log "Creating namespaces..."
+  ip netns add ns-public
+  ip netns add ns-private
+  ip netns add ns2-public
+  ip netns add ns2-private
+
+  log "Creating bridges..."
+  ip link add v-net1 type bridge
+  ip link set v-net1 up
+  ip link add v-net2 type bridge
+  ip link set v-net2 up
+
+  log "Creating veth pairs..."
+  ip link add veth-public type veth peer name veth-public-br
+  ip link add veth-private type veth peer name veth-private-br
+  ip link add veth2-public type veth peer name veth2-public-br
+  ip link add veth2-private type veth peer name veth2-private-b
+
+  ip link set veth-public netns ns-public
+  ip link set veth-private netns ns-private
+  ip link set veth2-public netns ns2-public
+  ip link set veth2-private netns ns2-private
+
+  ip link set veth-public-br master v-net1
+  ip link set veth-private-br master v-net1
+  ip link set veth2-public-br master v-net2
+  ip link set veth2-private-b master v-net2
+
+  ip link set veth-public-br up
+  ip link set veth-private-br up
+  ip link set veth2-public-br up
+  ip link set veth2-private-b up
+
+  log "Assigning IPs..."
+  ip -n ns-public addr add 192.168.50.1/24 dev veth-public
+  ip -n ns-private addr add 192.168.50.2/24 dev veth-private
+  ip -n ns2-public addr add 10.20.0.1/24 dev veth2-public
+  ip -n ns2-private addr add 10.20.0.2/24 dev veth2-private
+
+  ip -n ns-public link set veth-public up
+  ip -n ns-private link set veth-private up
+  ip -n ns2-public link set veth2-public up
+  ip -n ns2-private link set veth2-private up
+
+  ip addr add $VPC1_GATEWAY/24 dev v-net1
+  ip addr add $VPC2_GATEWAY/24 dev v-net2
+
+  log "Adding routes..."
+  ip -n ns-public route add default via $VPC1_GATEWAY
+  #ip -n ns-private route add default via $VPC1_GATEWAY
+  ip -n ns2-public route add default via $VPC2_GATEWAY
+  #ip -n ns2-private route add default via $VPC2_GATEWAY
+
+  log "Enabling NAT..."
+  echo 1 > /proc/sys/net/ipv4/ip_forward
+  iptables -t nat -A POSTROUTING -s 192.168.50.1/32 -o $INTERNET_IF -j MASQUERADE
+  iptables -t nat -A POSTROUTING -s 10.20.0.1/32 -o $INTERNET_IF -j MASQUERADE
+
+  log "✅ VPCs created successfully."
+}
+
+peer_vpcs() {
+  log "Setting up peering..."
+  ip link add veth-peer1 type veth peer name veth-peer2
+  ip link set veth-peer1 master v-net1
+  ip link set veth-peer2 master v-net2
+  ip link set veth-peer1 up
+  ip link set veth-peer2 up
+
+  ip route add $VPC2_CIDR dev v-net1
+  ip route add $VPC1_CIDR dev v-net2
+
+  log "✅ Peering established."
+}
+
+deploy_app() {
+  log "Deploying web servers..."
+  ip netns exec ns-public python3 -m http.server 8080 &
+  ip netns exec ns2-public python3 -m http.server 8080 &
+  log "✅ Web servers running on ports 8080 in public subnets."
+}
+
+teardown() {
+  log "Cleaning up..."
+  ip netns del ns-public 2>/dev/null || true
+  ip netns del ns-private 2>/dev/null || true
+  ip netns del ns2-public 2>/dev/null || true
+  ip netns del ns2-private 2>/dev/null || true
+
+  ip link del v-net1 2>/dev/null || true
+  ip link del v-net2 2>/dev/null || true
+  ip link del veth-peer1 2>/dev/null || true
+  ip link del veth-peer2 2>/dev/null || true
+
+  log "✅ Teardown complete."
+}
+
+case "$1" in
+  create) create_vpc ;;
+  peer) peer_vpcs ;;
+  deploy-app) deploy_app ;;
+  apply-policy) apply_policy "$@" ;;
+  teardown) teardown ;;
+  *) echo "Usage: $0 {create|peer|deploy-app|teardown}" ;;
+esac
+
