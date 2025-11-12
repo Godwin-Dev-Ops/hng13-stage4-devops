@@ -134,3 +134,51 @@ sudo ./vpcctl.sh delete myvpc
 🧱 Firewall test (port blocked)
 
 🧹 Cleanup log (delete successful)
+
+
+Optionally 
+
+🏗️ Build Your Own Virtual Private Cloud (VPC) on Linux
+🚀 Overview
+This project recreates a full-featured VPC using Linux primitives like network namespaces, bridges, veth pairs, routing tables, NAT, and iptables — no cloud provider needed.
+
+🎯 Objectives
+Create isolated VPCs with public/private subnets
+Enable NAT for public subnets
+Enforce firewall rules via JSON policies
+Support optional VPC peering
+Automate everything with a Bash CLI (vpcctl)
+
+🧰 Architecture Diagram
+Include the image we generated earlier showing bridges, namespaces, and peering.
+
+🧪 CLI Usage
+bash
+# Create VPCs and subnets
+./vpcctl create
+# Deploy apps in public subnets
+./vpcctl deploy-app
+# Peer VPCs
+./vpcctl peer
+# Apply firewall policy
+./vpcctl apply-policy policy.json
+# Teardown everything
+./vpcctl teardown
+🔐 Firewall Policy Example
+json
+{
+  "subnet": "10.20.0.0/24",
+  "ingress": [
+    {"port": 80, "protocol": "tcp", "action": "allow"},
+    {"port": 22, "protocol": "tcp", "action": "deny"}
+  ]
+}
+✅ Validation Tests
+Scenario	Result
+Subnet communication	✅
+Public subnet internet access	✅
+Private subnet isolation	✅
+VPC isolation	✅
+Peering enabled	✅
+Firewall enforcement	✅
+Clean teardown	✅
